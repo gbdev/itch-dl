@@ -1,27 +1,26 @@
-import os
 import json
-import re
 import logging
+import os
+import re
 import urllib.parse
-from typing import List, Dict, TypedDict, Optional, Union
+from typing import Dict, List, Optional, TypedDict, Union
 
 from bs4 import BeautifulSoup
 from requests.exceptions import HTTPError
-
 from tqdm import tqdm
 from tqdm.contrib.concurrent import thread_map
 
 from .api import ItchApiClient
-from .utils import ItchDownloadError, get_int_after_marker_in_json
 from .consts import ITCH_GAME_URL_REGEX
-from .infobox import parse_infobox, InfoboxMetadata
+from .infobox import InfoboxMetadata, parse_infobox
+from .utils import ItchDownloadError, get_int_after_marker_in_json
 
 TARGET_PATHS = {
     'site': 'site.html',
     'cover': 'cover',
-    'metadata': 'metadata.json',
-    'files': 'files',
-    'screenshots': 'screenshots'
+    'metadata': 'game.json',
+    'files': '',
+    'screenshots': ''
 }
 
 
@@ -160,7 +159,7 @@ class GameDownloader:
 
             if 'authors' in infobox and 'author' not in metadata:
                 # Some games may have multiple authors (ex. compilations).
-                metadata['author'] = "Multiple authors"
+                metadata['author'] = infobox['authors']
                 metadata['author_url'] = f"https://{urllib.parse.urlparse(url).netloc}"
 
             metadata['extra'] = infobox
@@ -193,7 +192,7 @@ class GameDownloader:
             # No timeouts, chunked uploads, default retry strategy, should be all good?
             with self.client.get(url, data=credentials, stream=True) as r:
                 r.raise_for_status()
-
+                
                 if download_path is not None:  # ...and it will be for external downloads.
                     with tqdm.wrapattr(open(download_path, "wb"), "write",
                                        miniters=1, desc=url,
@@ -216,7 +215,7 @@ class GameDownloader:
 
         author, game = match['author'], match['game']
 
-        download_path = os.path.join(self.download_to, author, game)
+        download_path = os.path.join(self.download_to, game)
         os.makedirs(download_path, exist_ok=True)
 
         paths: Dict[str, str] = {k: os.path.join(download_path, v) for k, v in TARGET_PATHS.items()}
@@ -263,7 +262,8 @@ class GameDownloader:
                     continue
 
                 upload_id = upload['id']
-                file_name = upload['filename']
+                file_name = upload['filename'].replace(" ","_").replace("'","")
+                
                 file_size = upload.get('size')
                 upload_is_external = upload['storage'] == 'external'
 
@@ -307,7 +307,7 @@ class GameDownloader:
                 if not screenshot:
                     continue
 
-                file_name = os.path.basename(screenshot)
+                file_name = os.path.basename(screenshot).replace("%", "")
                 try:
                     self.download_file(screenshot, os.path.join(paths['screenshots'], file_name), credentials={})
                 except Exception as e:
@@ -320,8 +320,8 @@ class GameDownloader:
             except Exception as e:
                 errors.append(f"Cover art download failed (this is not fatal): {e}")
 
-        with open(paths['site'], 'w') as f:
-            f.write(site.prettify())
+        # with open(paths['site'], 'w') as f:
+        #    f.write(site.prettify())
 
         with open(paths['metadata'], 'w') as f:
             json.dump(metadata, f, indent=4)
