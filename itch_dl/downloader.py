@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, TypedDict, Union
 
 from bs4 import BeautifulSoup
 from requests.exceptions import HTTPError
+from slugify import slugify
 from tqdm import tqdm
 from tqdm.contrib.concurrent import thread_map
 
@@ -35,6 +36,7 @@ class DownloadResult:
 class GameMetadata(TypedDict, total=False):
     game_id: int
     title: str
+    slug: str
     url: str
 
     errors: List[str]
@@ -93,7 +95,8 @@ class GameDownloader:
             itch_path = self.get_meta(site, name="itch:path")
             if itch_path is not None:
                 # Its value should be "games/12345", so:
-                game_id = int(itch_path.split("/")[-1])
+                # game_id = int(itch_path.split("/")[-1])
+                print("skipping")
         except ValueError:
             pass
 
@@ -134,9 +137,15 @@ class GameDownloader:
         if screenshots_node:
             screenshot_urls = [a['href'] for a in screenshots_node.find_all('a')]
 
+        slug = title or site.find("h1", class_="game_title").text.strip()
+        slug = slugify(slug)
+
+
+
         metadata = GameMetadata(
-            game_id=game_id,
+            #game_id=game_id,
             title=title or site.find("h1", class_="game_title").text.strip(),
+            slug=slug,
             url=url,
             cover_url=self.get_meta(site, property="og:image"),
             screenshots=screenshot_urls,
@@ -249,6 +258,7 @@ class GameDownloader:
             return DownloadResult(url, False, [f"Could not fetch game uploads for {title}: {e}"], [])
 
         game_uploads = game_uploads_req.json()['uploads']
+        
         logging.debug("Found %d upload(s): %s", len(game_uploads), str(game_uploads))
 
         external_urls = []
@@ -257,6 +267,10 @@ class GameDownloader:
         try:
             os.makedirs(paths['files'], exist_ok=True)
             for upload in game_uploads:
+                if upload["filename"] == "web.zip":
+                    continue
+
+                
                 if any([key not in upload for key in ('id', 'filename', 'storage')]):
                     errors.append(f"Upload metadata incomplete: {upload}")
                     continue
@@ -275,6 +289,8 @@ class GameDownloader:
 
                 try:
                     target_url = self.download_file_by_upload_id(upload_id, target_path, credentials)
+                    if ".gb" in upload["filename"].lower() or ".gbc" in upload["filename"].lower():
+                        romfile = file_name
                 except ItchDownloadError as e:
                     errors.append(f"Download failed for upload {upload}: {e}")
                     continue
@@ -294,12 +310,13 @@ class GameDownloader:
         except Exception as e:
             errors.append(f"Download failed for {title}: {e}")
 
-        metadata['errors'] = errors
-        metadata['external_downloads'] = external_urls
+        #metadata['errors'] = errors
+        #metadata['external_downloads'] = external_urls
 
         if len(external_urls) > 0:
             logging.warning(f"Game {title} has external download URLs: {external_urls}")
 
+        screenshot_names = []
         # TODO: Mirror JS/CSS assets
         if self.mirror_web:
             os.makedirs(paths['screenshots'], exist_ok=True)
@@ -310,6 +327,7 @@ class GameDownloader:
                 file_name = os.path.basename(screenshot).replace("%", "")
                 try:
                     self.download_file(screenshot, os.path.join(paths['screenshots'], file_name), credentials={})
+                    screenshot_names.append(file_name)
                 except Exception as e:
                     errors.append(f"Screenshot download failed (this is not fatal): {e}")
 
@@ -317,14 +335,50 @@ class GameDownloader:
             try:
                 cover_url = metadata['cover_url']
                 self.download_file(cover_url, paths['cover'] + os.path.splitext(cover_url)[-1], credentials={})
+                cover_filename = "cover.png"
             except Exception as e:
                 errors.append(f"Cover art download failed (this is not fatal): {e}")
 
         # with open(paths['site'], 'w') as f:
         #    f.write(site.prettify())
 
+        tags = []
+        metadata_hh = {}
+
+        metadata_hh["screenshots"] = screenshot_names
+        metadata_hh["typetag"] = "game"
+
+        if "links" in metadata["extra"]:
+            for link in metadata["extra"]["links"].keys():
+                if "source" in link.lower():
+                    metadata_hh["repository"] = metadata["extra"]["links"][link]
+
+        if "license" in metadata["extra"]:
+            for value in metadata["extra"]["license"].keys():
+                if "source" in link.lower():
+                    metadata_hh["gameLicense"] = value
+
+        if "genre" in metadata["extra"]:
+            for value in metadata["extra"]["genre"].keys():
+                tags.append(value)
+        
+        if tags != []:
+            metadata_hh["tags"] = tags
+
+        metadata_hh["files"] = [
+            {
+                "default": True,
+                "filename": romfile,
+                "playable": True
+            }]
+        
+        metadata_hh["developer"] = metadata["author"]
+        metadata_hh["cover"] = cover_filename
+        metadata_hh["date"] = metadata["published_at"]
+        metadata_hh["website"] = metadata["url"]
+
         with open(paths['metadata'], 'w') as f:
-            json.dump(metadata, f, indent=4)
+            json.dump(metadata_hh, f, indent=4)
 
         if len(errors) > 0:
             logging.error(f"Game {title} has download errors: {errors}")
